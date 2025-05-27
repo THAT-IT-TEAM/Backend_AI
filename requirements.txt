@@ -1,0 +1,10 @@
+supabase
+chromadb
+groq
+python-dotenv
+waitress
+sentence-transformers
+pyngrok 
+flask
+ngrok
+

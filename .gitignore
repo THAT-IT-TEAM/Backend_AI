@@ -1,0 +1,17 @@
+# Ignore Python virtual environment
+myenv/
+
+# Ignore persistent ChromaDB directories
+chroma_db/
+chroma_db_*/
+
+# Ignore environment variables file
+.env
+
+# Ignore Python cache files
+__pycache__/
+
+# Ignore editor/IDE specific files (examples)
+.vscode/
+.idea/
+*.swp 
