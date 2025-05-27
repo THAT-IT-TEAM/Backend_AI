@@ -27,14 +27,17 @@ def get_chatbot_response(question: str, context: str):
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a helpful AI assistant that answers questions based on the provided document context.",
+                    "content": '''You are a helpful AI assistant focused on providing information based on provided documents, especially regarding business trip expenses and budget details. 
+                    You can answer questions based on the document context. 
+                    If a user's query seems related to budget clarification beyond the document,
+                     or requires specific action related to purchases, suggest forwarding the query to the accounts team.''',
                 },
                 {
                     "role": "user",
                     "content": f"Context: {context}\n\nQuestion: {question}\n\nAnswer:",
                 }
             ],
-            model="llama3-8b-8192", # You can choose a different Groq model if needed
+            model="meta-llama/llama-4-scout-17b-16e-instruct", # You can choose a different Groq model if needed
         )
         return chat_completion.choices[0].message.content
     except Exception as e:
