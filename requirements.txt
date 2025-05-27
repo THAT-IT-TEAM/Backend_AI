@@ -7,4 +7,9 @@ sentence-transformers
 pyngrok 
 flask
 ngrok
+pandas
+PyPDF2
+python-docx
+openpyxl
+pytest 
 
