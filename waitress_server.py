@@ -13,6 +13,7 @@ import re # Import re for sanitizing directory names
 from supabase_fetch import fetch_document_from_supabase, supabase # Import supabase client
 from vector_db import add_document_to_db, search_db, delete_vector_db, DEFAULT_DB_DIRECTORY # Import delete_vector_db and DEFAULT_DB_DIRECTORY
 from llm_interaction import get_chatbot_response
+from ocr_expense_parser import parse_expense_text
 
 # For document processing (placeholders - install necessary libraries)
 # from PyPDF2 import PdfReader
@@ -232,6 +233,35 @@ def delete_db_endpoint():
     else:
         # Return 200 even if Supabase deletion failed, as the primary action (marking for deletion) succeeded
         return jsonify({"message": f"No matching Supabase records found or deleted for '{vector_db_name}'. Vector database directory deletion scheduled for shutdown."}), 200
+
+@app.route('/ocr', methods=['POST'])
+def process_ocr():
+    """
+    Handles OCR processing of documents from URLs.
+    Expects JSON with 'file_url' in the request body.
+    Returns the parsed expense data in JSON format.
+    """
+    data = request.get_json()
+    
+    if not data or 'file_url' not in data:
+        return jsonify({"error": "No file URL provided"}), 400
+    
+    file_url = data['file_url']
+    if not file_url:
+        return jsonify({"error": "Empty file URL provided"}), 400
+
+    try:
+        # Send the URL directly to the expense parser
+        parsed_data = parse_expense_text(file_url)
+        
+        if not parsed_data:
+            return jsonify({"error": "Could not parse expense data from document"}), 400
+            
+        return jsonify(parsed_data)
+        
+    except Exception as e:
+        print(f"Error processing OCR request: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # --- Server Execution ---
 

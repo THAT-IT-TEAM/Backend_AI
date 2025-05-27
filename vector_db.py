@@ -4,6 +4,11 @@ import os
 from supabase_fetch import supabase # Import the supabase client
 import uuid # Import uuid for generating unique IDs
 import shutil # Import shutil for directory removal
+import io
+import pandas as pd
+from PyPDF2 import PdfReader
+import docx
+import json
 
 # Initialize a local embedding model
 # You can choose a different model depending on your needs
@@ -12,6 +17,60 @@ embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 # Default persistent DB directory
 DEFAULT_DB_DIRECTORY = "./chroma_db"
+
+def process_document_content(content: bytes, file_extension: str) -> str:
+    """
+    Process document content based on file type and extract text.
+    
+    Args:
+        content: The raw document content in bytes
+        file_extension: The file extension (e.g., '.pdf', '.xlsx', etc.)
+        
+    Returns:
+        Extracted text content from the document
+    """
+    try:
+        file_extension = file_extension.lower()
+        
+        if file_extension == '.txt':
+            return content.decode('utf-8')
+            
+        elif file_extension == '.pdf':
+            pdf_file = io.BytesIO(content)
+            reader = PdfReader(pdf_file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() + "\n"
+            return text
+            
+        elif file_extension in ['.xls', '.xlsx']:
+            excel_file = io.BytesIO(content)
+            df = pd.read_excel(excel_file)
+            # Convert DataFrame to string representation
+            return df.to_string()
+            
+        elif file_extension in ['.doc', '.docx']:
+            doc_file = io.BytesIO(content)
+            doc = docx.Document(doc_file)
+            text = ""
+            for paragraph in doc.paragraphs:
+                text += paragraph.text + "\n"
+            return text
+            
+        elif file_extension == '.json':
+            return json.dumps(json.loads(content), indent=2)
+            
+        elif file_extension == '.csv':
+            csv_file = io.BytesIO(content)
+            df = pd.read_csv(csv_file)
+            return df.to_string()
+            
+        else:
+            raise ValueError(f"Unsupported file type: {file_extension}")
+            
+    except Exception as e:
+        print(f"Error processing document: {e}")
+        raise
 
 def get_embedding(text: str):
     """
@@ -33,21 +92,38 @@ def get_or_create_vector_db_collection(db_directory: str = DEFAULT_DB_DIRECTORY)
     collection = client.get_or_create_collection(name="document_chunks")
     return collection, db_directory
 
-def add_document_to_db(document_content: str, doc_id: str, db_directory: str = DEFAULT_DB_DIRECTORY):
+def add_document_to_db(document_content: bytes | str, doc_id: str, db_directory: str = DEFAULT_DB_DIRECTORY):
     """
     Adds a document to the specified ChromaDB collection and logs it in Supabase.
 
     Args:
-        document_content: The text content of the document.
-        doc_id: A unique ID for the document.
+        document_content: The document content (either as text string or bytes)
+        doc_id: A unique ID for the document (should include file extension)
         db_directory: The directory path for the persistent ChromaDB.
     """
     try:
         collection, current_db_directory = get_or_create_vector_db_collection(db_directory)
 
-        # Basic text splitting (you might need a more sophisticated splitter
-        # depending on document types like PDF, etc.)
-        chunks = [document_content[i:i + 500] for i in range(0, len(document_content), 500)]
+        # Get file extension from doc_id
+        _, file_extension = os.path.splitext(doc_id)
+        
+        # Process document content based on type
+        if isinstance(document_content, bytes):
+            text_content = process_document_content(document_content, file_extension)
+        else:
+            text_content = document_content
+
+        # Split text into chunks with overlap for better context
+        chunk_size = 500
+        overlap = 100
+        chunks = []
+        start = 0
+        while start < len(text_content):
+            end = start + chunk_size
+            chunk = text_content[start:end]
+            chunks.append(chunk)
+            start = end - overlap
+
         chunk_ids = [f"{doc_id}_{i}" for i in range(len(chunks))]
         embeddings = [get_embedding(chunk) for chunk in chunks]
 
@@ -55,27 +131,29 @@ def add_document_to_db(document_content: str, doc_id: str, db_directory: str = D
         collection.add(
             embeddings=embeddings,
             documents=chunks,
-            ids=chunk_ids
+            ids=chunk_ids,
+            metadatas=[{"file_type": file_extension[1:], "chunk_index": i} for i in range(len(chunks))]
         )
         print(f"Added {len(chunks)} chunks for document {doc_id} to ChromaDB at {current_db_directory}.")
 
         # Log the document addition in Supabase
         try:
-            # Supabase insert returns data and count. Check data for success.
             data, count = supabase.table('vector_db_documents').insert({
                 "vector_db_name": current_db_directory,
                 "document_id": doc_id,
+                "file_type": file_extension[1:],
                 "id": str(uuid.uuid4())
             }).execute()
             if data:
-                 print(f"Logged document {doc_id} in Supabase table 'vector_db_documents' for DB {current_db_directory}.")
+                print(f"Logged document {doc_id} in Supabase table 'vector_db_documents' for DB {current_db_directory}.")
             else:
-                 print(f"Supabase logging for document {doc_id} for DB {current_db_directory} may have failed (no data returned).")
+                print(f"Supabase logging for document {doc_id} for DB {current_db_directory} may have failed (no data returned).")
         except Exception as e:
             print(f"Error logging document {doc_id} in Supabase: {e}")
 
     except Exception as e:
         print(f"Error adding document {doc_id} to ChromaDB: {e}")
+        raise
 
 def search_db(query: str, n_results: int = 5, db_directory: str = DEFAULT_DB_DIRECTORY):
     """
