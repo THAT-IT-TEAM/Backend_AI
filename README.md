@@ -183,6 +183,84 @@ Query documents using natural language.
 }
 ```
 
+### 3. Analytics Endpoints
+
+#### Get Trip Analytics (`/api/analytics/trip`)
+
+Get comprehensive analytics for a specific trip.
+
+**Endpoint:** `POST /api/analytics/trip`
+
+**Request Body:**
+
+```json
+{
+  "trip_name": "Summer Vacation 2024"
+}
+```
+
+**Response:**
+
+```json
+{
+  "expense_distribution": "Plotly figure JSON",
+  "trend_analysis": "Plotly figure JSON",
+  "budget_comparison": "Plotly figure JSON",
+  "expense_clusters": "Plotly figure JSON",
+  "ai_insights": "AI-generated insights about the trip expenses"
+}
+```
+
+#### Get All Analytics (`/api/analytics/all`)
+
+Get analytics for all trips in the system.
+
+**Endpoint:** `GET /api/analytics/all`
+
+**Response:**
+
+```json
+{
+  "expense_distribution": "Plotly figure JSON",
+  "trend_analysis": "Plotly figure JSON",
+  "expense_clusters": "Plotly figure JSON"
+}
+```
+
+### Server Cleanup
+
+The server implements graceful shutdown and cleanup procedures:
+
+1. **Vector Database Cleanup**
+
+   - Vector databases marked for deletion are cleaned up on server shutdown
+   - Use the `/delete_db` endpoint to mark databases for deletion
+   - Cleanup is handled automatically on server exit
+
+2. **Ngrok Tunnel Cleanup**
+
+   - If ngrok is configured, the tunnel is properly disconnected on shutdown
+   - Handles both normal shutdown and interrupt signals (SIGINT, SIGTERM)
+   - Ensures no lingering tunnels remain active
+
+3. **Signal Handling**
+   - Implements proper signal handlers for graceful shutdown
+   - Handles SIGINT (Ctrl+C) and SIGTERM signals
+   - Ensures all cleanup procedures are executed before exit
+
+Example usage of analytics endpoints:
+
+```bash
+# Get analytics for a specific trip
+curl -X POST http://localhost:8080/api/analytics/trip \
+  -H "Content-Type: application/json" \
+  -d '{"trip_name": "Summer Vacation 2024"}'
+
+# Get analytics for all trips
+curl -X GET http://localhost:8080/api/analytics/all \
+  -H "Accept: application/json"
+```
+
 ## Testing
 
 The application includes comprehensive test cases to verify core functionalities:

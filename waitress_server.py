@@ -18,6 +18,8 @@ from hypercorn.asyncio import serve as hypercorn_serve
 from hypercorn.config import Config
 import signal
 import sys
+import plotly.express as px
+import plotly.graph_objects as go
 
 # import necessary modules
 from supabase_fetch import fetch_document_from_supabase, supabase # Import supabase client
@@ -25,6 +27,7 @@ from vector_db import add_document_to_db, search_db, delete_vector_db, DEFAULT_D
 from llm_interaction import get_chatbot_response
 from ocr_expense_parser import parse_expense_text
 from receipt_fraud_detector import ReceiptFraudDetector, check_receipt_fraud
+from trip_analytics import TripAnalytics
 
 # For document processing (placeholders - install necessary libraries)
 # from PyPDF2 import PdfReader
@@ -44,6 +47,9 @@ asgi_app = WsgiToAsgi(app)
 
 # List to hold vector database directories to be deleted on exit
 dbs_to_delete_on_exit = []
+
+# Global variables
+ngrok_tunnel = None
 
 # --- Document Processing and Indexing ----
 #
@@ -349,6 +355,52 @@ async def check_fraud():
         print(f"Error processing fraud check request: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/analytics/trip', methods=['POST'])
+def get_trip_analytics():
+    """Get all analytics for a specific trip by name from request body"""
+    try:
+        data = request.get_json()
+        if not data or 'trip_name' not in data:
+            return jsonify({'error': 'Missing trip_name in request body'}), 400
+            
+        trip_name = data['trip_name']
+        print(f"Processing analytics for trip: {trip_name}")  # Debug log
+        
+        analytics = TripAnalytics()
+        results = analytics.get_all_analytics(trip_name)
+        print(f"Analytics results keys: {list(results.keys())}")  # Debug log
+        
+        # Convert Plotly figures to JSON
+        for key, value in results.items():
+            print(f"Processing key: {key}, value type: {type(value)}")  # Debug log
+            if hasattr(value, 'to_json'):  # Check if it's a Plotly figure by checking for to_json method
+                results[key] = value.to_json()
+            elif value is not None:  # Debug log for non-None values that aren't figures
+                print(f"Non-figure value for {key}: {value}")
+        
+        return jsonify(results)
+    except Exception as e:
+        print(f"Error in get_trip_analytics: {str(e)}")  # Debug log
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")  # Debug log with full traceback
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/analytics/all', methods=['GET'])
+def get_all_analytics():
+    """Get analytics for all trips"""
+    try:
+        analytics = TripAnalytics()
+        results = analytics.get_all_analytics()
+        
+        # Convert Plotly figures to JSON
+        for key, value in results.items():
+            if hasattr(value, 'to_json'):  # Check if it's a Plotly figure by checking for to_json method
+                results[key] = value.to_json()
+        
+        return jsonify(results)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # --- Server Execution ---
 
 # Cleanup function to delete marked databases on exit
@@ -362,18 +414,17 @@ def cleanup_dbs_on_exit():
 def cleanup_ngrok():
     """Clean up ngrok tunnel if it exists."""
     global ngrok_tunnel
-    if ngrok_tunnel is not None:
-        try:
-            if hasattr(ngrok_tunnel, 'public_url'):
-                print(f"Disconnecting ngrok tunnel at {ngrok_tunnel.public_url}")
-                ngrok.disconnect(ngrok_tunnel.public_url)
-            else:
-                print("No active ngrok tunnel to disconnect")
-        except Exception as e:
-            print(f"Error during ngrok disconnection: {str(e)}")
-        finally:
-            ngrok_tunnel = None
-            print("Ngrok disconnected.")
+    try:
+        if ngrok_tunnel is not None and hasattr(ngrok_tunnel, 'public_url'):
+            print(f"Disconnecting ngrok tunnel at {ngrok_tunnel.public_url}")
+            ngrok.disconnect(ngrok_tunnel.public_url)
+        else:
+            print("No active ngrok tunnel to disconnect")
+    except Exception as e:
+        print(f"Error during ngrok disconnection: {str(e)}")
+    finally:
+        ngrok_tunnel = None
+        print("Ngrok disconnected.")
 
 # Register cleanup functions (registered in reverse order of execution)
 atexit.register(cleanup_ngrok)
@@ -393,7 +444,6 @@ if __name__ == '__main__':
     
     try:
         # Set up ngrok tunnel if configured
-        ngrok_tunnel = None
         ngrok_auth_token = os.environ.get("NGROK_AUTH_TOKEN")
         ngrok_domain = os.environ.get("NGROK_DOMAIN")
         

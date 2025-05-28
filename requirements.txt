@@ -23,3 +23,9 @@ beautifulsoup4
 python-magic
 hypercorn 
 asgiref
+plotly
+dash
+dash-bootstrap-components
+scikit-learn
+matplotlib
+seaborn
