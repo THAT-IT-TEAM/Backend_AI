@@ -11,5 +11,15 @@ pandas
 PyPDF2
 python-docx
 openpyxl
-pytest 
-
+pytest
+opencv-python
+scikit-image
+pytesseract
+numpy
+pillow
+requests
+aiohttp
+beautifulsoup4
+python-magic
+hypercorn 
+asgiref

@@ -8,12 +8,23 @@ import time # Import time for potential delays
 import io # Import io for handling bytes data
 import uuid # Import uuid for generating unique IDs
 import re # Import re for sanitizing directory names
+import asyncio
+from uuid import UUID
+from typing import Dict, Any
+from flask.views import View
+from flask.typing import ResponseReturnValue
+from asgiref.wsgi import WsgiToAsgi
+from hypercorn.asyncio import serve as hypercorn_serve
+from hypercorn.config import Config
+import signal
+import sys
 
 # import necessary modules
 from supabase_fetch import fetch_document_from_supabase, supabase # Import supabase client
 from vector_db import add_document_to_db, search_db, delete_vector_db, DEFAULT_DB_DIRECTORY # Import delete_vector_db and DEFAULT_DB_DIRECTORY
 from llm_interaction import get_chatbot_response
 from ocr_expense_parser import parse_expense_text
+from receipt_fraud_detector import ReceiptFraudDetector, check_receipt_fraud
 
 # For document processing (placeholders - install necessary libraries)
 # from PyPDF2 import PdfReader
@@ -26,6 +37,10 @@ load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
+app.config['PROPAGATE_EXCEPTIONS'] = True
+
+# Configure async support
+asgi_app = WsgiToAsgi(app)
 
 # List to hold vector database directories to be deleted on exit
 dbs_to_delete_on_exit = []
@@ -238,29 +253,100 @@ def delete_db_endpoint():
 def process_ocr():
     """
     Handles OCR processing of documents from URLs.
-    Expects JSON with 'file_url' in the request body.
+    Expects JSON with:
+    - file_url: URL of the document to process
+    - user_id: UUID of the user submitting the expense
+    - trip_id: UUID of the trip this expense belongs to
+    
     Returns the parsed expense data in JSON format.
     """
     data = request.get_json()
     
-    if not data or 'file_url' not in data:
-        return jsonify({"error": "No file URL provided"}), 400
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+        
+    required_fields = ['file_url', 'user_id', 'trip_id']
+    missing_fields = [field for field in required_fields if field not in data]
+    if missing_fields:
+        return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
     
     file_url = data['file_url']
+    user_id = data['user_id']
+    trip_id = data['trip_id']
+    
     if not file_url:
         return jsonify({"error": "Empty file URL provided"}), 400
-
+        
     try:
-        # Send the URL directly to the expense parser
-        parsed_data = parse_expense_text(file_url)
+        # Validate UUIDs
+        try:
+            user_id = UUID(user_id)
+            trip_id = UUID(trip_id)
+        except ValueError:
+            return jsonify({"error": "Invalid UUID format for user_id or trip_id"}), 400
+
+        # Send the URL and IDs to the expense parser
+        parsed_data = parse_expense_text(file_url, user_id, trip_id)
         
         if not parsed_data:
             return jsonify({"error": "Could not parse expense data from document"}), 400
+            
+        # Ensure we have an expense_id
+        if not parsed_data.get('expense_id'):
+            return jsonify({"error": "Failed to store expense data in database"}), 500
             
         return jsonify(parsed_data)
         
     except Exception as e:
         print(f"Error processing OCR request: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/fraud-check', methods=['POST'])
+async def check_fraud():
+    """
+    Handles fraud detection for expense receipts.
+    Expects JSON with:
+    - expense_id: ID of the expense to check
+    - file_url: URL of the receipt image/document
+    
+    Returns fraud analysis results in JSON format.
+    """
+    data = request.get_json()
+    
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+        
+    required_fields = ['expense_id', 'file_url']
+    missing_fields = [field for field in required_fields if field not in data]
+    if missing_fields:
+        return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
+    
+    expense_id = data['expense_id']
+    file_url = data['file_url']
+    
+    if not expense_id:
+        return jsonify({"error": "Invalid or missing expense_id"}), 400
+        
+    if not file_url:
+        return jsonify({"error": "Empty file URL provided"}), 400
+        
+    try:
+        # Validate expense_id is a valid UUID
+        try:
+            expense_id = UUID(expense_id)
+        except ValueError:
+            return jsonify({"error": "Invalid UUID format for expense_id"}), 400
+
+        # Create fraud detector instance and analyze receipt
+        result = await check_receipt_fraud(expense_id, file_url)
+        
+        if not result:
+            return jsonify({"error": "Failed to analyze receipt for fraud"}), 500
+            
+        return jsonify(result)
+        
+    except Exception as e:
+        print(f"Error processing fraud check request: {e}")
         return jsonify({"error": str(e)}), 500
 
 # --- Server Execution ---
@@ -274,84 +360,68 @@ def cleanup_dbs_on_exit():
 
 # Cleanup function to disconnect ngrok
 def cleanup_ngrok():
-    print("Disconnecting ngrok...")
-    try:
-        ngrok.disconnect()
-        print("Ngrok disconnected.")
-    except Exception as e:
-        print(f"Error during ngrok disconnection: {e}")
+    """Clean up ngrok tunnel if it exists."""
+    global ngrok_tunnel
+    if ngrok_tunnel is not None:
+        try:
+            if hasattr(ngrok_tunnel, 'public_url'):
+                print(f"Disconnecting ngrok tunnel at {ngrok_tunnel.public_url}")
+                ngrok.disconnect(ngrok_tunnel.public_url)
+            else:
+                print("No active ngrok tunnel to disconnect")
+        except Exception as e:
+            print(f"Error during ngrok disconnection: {str(e)}")
+        finally:
+            ngrok_tunnel = None
+            print("Ngrok disconnected.")
 
 # Register cleanup functions (registered in reverse order of execution)
 atexit.register(cleanup_ngrok)
 atexit.register(cleanup_dbs_on_exit)
 
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    print("\nReceived shutdown signal. Cleaning up...")
+    cleanup_ngrok()
+    print("Shutdown complete.")
+    sys.exit(0)
+
 if __name__ == '__main__':
-    # Get Ngrok auth token and domain from environment variables
-    ngrok_auth_token = os.environ.get("NGROK_AUTH_TOKEN")
-    # You'll need to add an NGROK_DOMAIN variable to your .env file for a fixed domain
-    ngrok_domain = os.environ.get("NGROK_DOMAIN")
-
-    print("Starting Waitress server on http://127.0.0.1:5000")
-
-    # Start Waitress server in a separate thread so Ngrok can run in the main thread
-    import threading
-    server_thread = threading.Thread(target=lambda: serve(app, host='127.0.0.1', port=5000))
-    server_thread.daemon = True # Allow main thread to exit even if server thread is running
-    server_thread.start()
-
-    # Give the server a moment to start
-    time.sleep(2) # Increased sleep time slightly
-
-    # Check if the server thread is alive. If not, there was likely an error starting Waitress.
-    if not server_thread.is_alive():
-        print("Error: Waitress server failed to start. Exiting.")
-        exit(1)
-
-
-    if not ngrok_auth_token:
-        print("Warning: NGROK_AUTH_TOKEN not set in .env. Ngrok tunnel will not be created automatically.")
-        # If ngrok is not configured, keep the local server running
-        server_thread.join() # Wait for the server thread to finish
-    else:
-        try:
-            # Set Ngrok auth token
-            ngrok.set_auth_token(ngrok_auth_token)
-            print("Ngrok auth token set.")
-
-            # Connect to the specified port (5000) using ngrok.forward
-            print("Starting ngrok tunnel...")
-
-            # Check if ngrok_domain is set and not empty
+    # Set up signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    try:
+        # Set up ngrok tunnel if configured
+        ngrok_tunnel = None
+        ngrok_auth_token = os.environ.get("NGROK_AUTH_TOKEN")
+        ngrok_domain = os.environ.get("NGROK_DOMAIN")
+        
+        if ngrok_auth_token:
+            from pyngrok import ngrok, conf
+            conf.get_default().auth_token = ngrok_auth_token
+            
             if ngrok_domain:
-                 listener = ngrok.forward(5000, domain=ngrok_domain)
+                ngrok_tunnel = ngrok.connect(8080, domain=ngrok_domain)
             else:
-                 listener = ngrok.forward(5000)
-
-            # Check if listener is valid before accessing url()
-            if listener:
-                 public_url = listener.url()
-                 print(f"Ngrok tunnel established at: {public_url}")
-                 print("Waitress server and Ngrok tunnel are running.")
-                 print("Press Ctrl+C to stop.")
-
-                 # Keep the main thread alive to keep the ngrok tunnel active
-                 while True:
-                    time.sleep(0.1) # Reduced sleep to be more responsive to Ctrl+C
-            else:
-                 # If listener is not created, this part will be reached.
-                 print("Ngrok listener not created.")
-                 print("The server is running locally, but not publicly accessible via Ngrok.")
-                 # Keep the main thread alive for the server_thread to run.
-                 server_thread.join() # Wait for the server thread to finish
-
-        except Exception as e:
-            print(f"Error starting ngrok tunnel: {e}")
-            print("The server is running locally, but not publicly accessible via Ngrok.")
-            # If ngrok fails in the try block, this part will be reached.
-            # Keep the main thread alive for the server_thread to run.
-            server_thread.join() # Wait for the server thread to finish if ngrok failed
-
-    # This part will be reached when the server_thread finishes (either after ngrok failure or if ngrok wasn't configured).
-    # If ngrok succeeded, the while True loop prevented reaching here until script termination (e.g. Ctrl+C),
-    # at which point atexit handlers would run.
-    pass # Keep the script running if the server thread is active after ngrok issues 
+                ngrok_tunnel = ngrok.connect(8080)
+                
+            print(f"Ngrok tunnel established at: {ngrok_tunnel.public_url}")
+        else:
+            print("Warning: NGROK_AUTH_TOKEN not set. Running without ngrok tunnel.")
+        
+        # Start the server
+        serve(app, host='0.0.0.0', port=8080)
+        
+    except Exception as e:
+        print(f"Error starting server: {str(e)}")
+        cleanup_ngrok()
+        sys.exit(1)
+    finally:
+        # Clean up databases on exit
+        print("Checking for databases to delete on exit...")
+        cleanup_dbs_on_exit()
+        print("Database cleanup complete.")
+        # Clean up ngrok
+        print("Disconnecting ngrok...")
+        cleanup_ngrok() 
