@@ -1,0 +1,30 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+myenv/
+.pytest_cache/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Environment variables
+.env
+
+# Vector database
+chroma_db/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log 

@@ -1,7 +1,6 @@
 import chromadb
 from sentence_transformers import SentenceTransformer
 import os
-from supabase_fetch import supabase # Import the supabase client
 import uuid # Import uuid for generating unique IDs
 import shutil # Import shutil for directory removal
 import io
@@ -9,6 +8,7 @@ import pandas as pd
 from PyPDF2 import PdfReader
 import docx
 import json
+from typing import Union
 
 # Initialize a local embedding model
 # You can choose a different model depending on your needs
@@ -92,9 +92,9 @@ def get_or_create_vector_db_collection(db_directory: str = DEFAULT_DB_DIRECTORY)
     collection = client.get_or_create_collection(name="document_chunks")
     return collection, db_directory
 
-def add_document_to_db(document_content: bytes | str, doc_id: str, db_directory: str = DEFAULT_DB_DIRECTORY):
+def add_document_to_db(document_content: Union[bytes, str], doc_id: str, db_directory: str = DEFAULT_DB_DIRECTORY):
     """
-    Adds a document to the specified ChromaDB collection and logs it in Supabase.
+    Adds a document to the specified ChromaDB collection.
 
     Args:
         document_content: The document content (either as text string or bytes)
@@ -135,21 +135,6 @@ def add_document_to_db(document_content: bytes | str, doc_id: str, db_directory:
             metadatas=[{"file_type": file_extension[1:], "chunk_index": i} for i in range(len(chunks))]
         )
         print(f"Added {len(chunks)} chunks for document {doc_id} to ChromaDB at {current_db_directory}.")
-
-        # Log the document addition in Supabase
-        try:
-            data, count = supabase.table('vector_db_documents').insert({
-                "vector_db_name": current_db_directory,
-                "document_id": doc_id,
-                "file_type": file_extension[1:],
-                "id": str(uuid.uuid4())
-            }).execute()
-            if data:
-                print(f"Logged document {doc_id} in Supabase table 'vector_db_documents' for DB {current_db_directory}.")
-            else:
-                print(f"Supabase logging for document {doc_id} for DB {current_db_directory} may have failed (no data returned).")
-        except Exception as e:
-            print(f"Error logging document {doc_id} in Supabase: {e}")
 
     except Exception as e:
         print(f"Error adding document {doc_id} to ChromaDB: {e}")

@@ -7,50 +7,75 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import json
 from datetime import datetime
-from supabase_fetch import supabase
+from dotenv import load_dotenv
+import os
+from api_client import get_records_from_api
 from llm_interaction import get_llm_insights
+from typing import Optional, Dict, Any, List
+import re
 
 class TripAnalytics:
     def __init__(self):
-        self.supabase = supabase
+        pass
         
     def fetch_trip_data(self, trip_name=None):
-        """Fetch trip data from Supabase"""
-        query = self.supabase.table('trips').select('*')
+        """Fetch trip data from local API"""
+        print(f"Fetching trip data for trip_name: {trip_name}")
+        query_params = {}
         if trip_name:
-            query = query.eq('name', trip_name)
-        response = query.execute()
-        return pd.DataFrame(response.data)
+            query_params['name'] = trip_name
+        
+        # Use the generic API client to fetch trips
+        trips_data = get_records_from_api('trips', query_params)
+        
+        if trips_data is None:
+            print("Error: Could not fetch trips data from API.")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(trips_data)
+        return df
     
     def fetch_expenses(self, trip_name=None):
-        """Fetch expense data from Supabase"""
+        """Fetch expense data from local API"""
         try:
+            query_params = {}
             if trip_name:
-                # First get the trip ID from the name
+                # First get the trip ID from the name using our API
                 trip_data = self.fetch_trip_data(trip_name)
                 if trip_data.empty:
+                    print(f"No trip found with name: {trip_name}")
                     return pd.DataFrame()
                 trip_id = trip_data.iloc[0]['id']
-                query = self.supabase.table('expenses').select('*').eq('trip_id', trip_id)
-            else:
-                query = self.supabase.table('expenses').select('*')
-            response = query.execute()
-            df = pd.DataFrame(response.data)
+                query_params['trip_id'] = trip_id
             
-            # Ensure required columns exist
-            required_columns = ['amount', 'category', 'created_at']
+            # Use the generic API client to fetch expenses
+            expenses_data = get_records_from_api('expenses', query_params)
+            
+            if expenses_data is None:
+                print("Error: Could not fetch expenses data from API.")
+                return pd.DataFrame()
+
+            df = pd.DataFrame(expenses_data)
+            
+            # Ensure required columns exist and convert types if necessary
+            required_columns = ['amount', 'category', 'created_at', 'transaction_date']
             missing_columns = [col for col in required_columns if col not in df.columns]
             if missing_columns:
-                print(f"Warning: Missing columns in expenses data: {missing_columns}")
+                print(f"Warning: Missing columns in expenses data from API: {missing_columns}")
+                # Attempt to proceed with available data or return empty if critical columns are missing
                 return pd.DataFrame()
                 
-            # Convert created_at to datetime and create date column
-            if 'created_at' in df.columns:
-                df['date'] = pd.to_datetime(df['created_at']).dt.date
-            else:
-                print("Warning: created_at column not found in expenses data")
-                return pd.DataFrame()
-                
+            # Convert amount to numeric, handling potential errors
+            df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+            df.dropna(subset=['amount'], inplace=True) # Remove rows where amount couldn't be converted
+
+            # Use transaction_date if available, fallback to created_at
+            df['date'] = pd.to_datetime(df['transaction_date'], errors='coerce').fillna(
+                pd.to_datetime(df['created_at'], errors='coerce')
+            ).dt.date
+            
+            df.dropna(subset=['date'], inplace=True) # Remove rows where date couldn't be converted
+
             return df
         except Exception as e:
             print(f"Error fetching expenses: {e}")

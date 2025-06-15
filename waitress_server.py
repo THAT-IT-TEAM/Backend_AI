@@ -22,7 +22,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # import necessary modules
-from supabase_fetch import fetch_document_from_supabase, supabase # Import supabase client
+from api_client import fetch_document_from_api, delete_vector_db_document_via_api # Import from our new API client
 from vector_db import add_document_to_db, search_db, delete_vector_db, DEFAULT_DB_DIRECTORY # Import delete_vector_db and DEFAULT_DB_DIRECTORY
 from llm_interaction import get_chatbot_response
 from ocr_expense_parser import parse_expense_text
@@ -170,12 +170,12 @@ def chat():
 
         print(f"Processing document into new vector database: {new_db_directory}")
 
-        # 1. Fetch document from Supabase
-        document_content = fetch_document_from_supabase(bucket_name, document_id)
+        # 1. Fetch document from API
+        document_content = fetch_document_from_api(bucket_name, document_id)
         if document_content is None:
-            return jsonify({"error": f"Could not fetch document '{document_id}' from Supabase bucket '{bucket_name}'."}), 500
+            return jsonify({"error": f"Could not fetch document '{document_id}' from API bucket '{bucket_name}'."}), 500
 
-        # 2. Process document and add to the NEW vector DB (logs to Supabase)
+        # 2. Process document and add to the NEW vector DB
         processed = process_document_content(document_content, document_id, db_directory=new_db_directory)
         if not processed:
              # If processing fails, the new directory might still exist but be incomplete or empty.
@@ -233,79 +233,54 @@ def delete_db_endpoint():
     else:
         print(f"Vector database '{vector_db_name}' was already marked for deletion.")
 
-    supabase_delete_successful = False
-    # 1. Delete records from Supabase table
-    try:
-        # Supabase delete returns data and count. Check data for success.
-        data, count = supabase.table('vector_db_documents').delete().eq('vector_db_name', vector_db_name).execute()
-        if data:
-             print(f"Deleted records from Supabase table 'vector_db_documents' for DB {vector_db_name}.")
-             supabase_delete_successful = True
-        else:
-             print(f"No matching records found or deleted in Supabase table 'vector_db_documents' for DB {vector_db_name}.")
+    # 1. Delete records from Node.js API
+    api_delete_successful = delete_vector_db_document_via_api(vector_db_name)
+    if not api_delete_successful:
+        print(f"Warning: Failed to delete records from Node.js API for DB {vector_db_name}.")
+        # Even if API deletion fails, we still proceed with marking for local deletion
 
-    except Exception as e:
-        print(f"Error deleting Supabase records for DB {vector_db_name}: {e}")
-        # Continue, as the main action for this endpoint is marking for deletion
-        pass
-
-    if supabase_delete_successful:
-        return jsonify({"message": f"Supabase records for '{vector_db_name}' deleted. Vector database directory deletion scheduled for shutdown."}), 200
-    else:
-        # Return 200 even if Supabase deletion failed, as the primary action (marking for deletion) succeeded
-        return jsonify({"message": f"No matching Supabase records found or deleted for '{vector_db_name}'. Vector database directory deletion scheduled for shutdown."}), 200
+    return jsonify({"message": f"Vector database '{vector_db_name}' marked for local deletion and API record deletion attempted.", "api_delete_successful": api_delete_successful})
 
 @app.route('/ocr', methods=['POST'])
-def process_ocr():
+async def process_ocr():
     """
     Handles OCR processing of documents from URLs.
     Expects JSON with:
     - file_url: URL of the document to process
     - user_id: UUID of the user submitting the expense
     - trip_id: UUID of the trip this expense belongs to
-    
-    Returns the parsed expense data in JSON format.
     """
     data = request.get_json()
-    
-    if not data:
-        return jsonify({"error": "No data provided"}), 400
-        
-    required_fields = ['file_url', 'user_id', 'trip_id']
-    missing_fields = [field for field in required_fields if field not in data]
-    if missing_fields:
-        return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
-    
-    file_url = data['file_url']
-    user_id = data['user_id']
-    trip_id = data['trip_id']
-    
-    if not file_url:
-        return jsonify({"error": "Empty file URL provided"}), 400
-        
-    try:
-        # Validate UUIDs
-        try:
-            user_id = UUID(user_id)
-            trip_id = UUID(trip_id)
-        except ValueError:
-            return jsonify({"error": "Invalid UUID format for user_id or trip_id"}), 400
 
-        # Send the URL and IDs to the expense parser
-        parsed_data = parse_expense_text(file_url, user_id, trip_id)
-        
-        if not parsed_data:
-            return jsonify({"error": "Could not parse expense data from document"}), 400
-            
-        # Ensure we have an expense_id
-        if not parsed_data.get('expense_id'):
-            return jsonify({"error": "Failed to store expense data in database"}), 500
-            
-        return jsonify(parsed_data)
-        
+    file_url = data.get('file_url')
+    user_id_str = data.get('user_id')
+    trip_id_str = data.get('trip_id')
+
+    if not file_url or not user_id_str or not trip_id_str:
+        return jsonify({"error": "Missing file_url, user_id, or trip_id"}), 400
+
+    try:
+        user_id = UUID(user_id_str)
+        trip_id = UUID(trip_id_str)
+    except ValueError:
+        return jsonify({"error": "Invalid user_id or trip_id format (must be UUID)"}), 400
+
+    print(f"Received OCR request for file: {file_url}, user: {user_id}, trip: {trip_id}")
+    
+    try:
+        # The key change: await parse_expense_text
+        parsed_result = await parse_expense_text(file_url, user_id, trip_id)
+        if parsed_result['expense_id']:
+            return jsonify({"message": "OCR processed and expense stored successfully", "expense_id": parsed_result['expense_id'], "summary": parsed_result['summary']}), 200
+        else:
+            # If expense_id is None, it means storage failed or parsing was incomplete
+            return jsonify({"error": parsed_result.get('summary', "Failed to process OCR and store expense data.")}), 500
+
     except Exception as e:
         print(f"Error processing OCR request: {e}")
-        return jsonify({"error": str(e)}), 500
+        import traceback
+        traceback.print_exc() # Print full traceback for debugging
+        return jsonify({"error": f"Error processing OCR: {e}"}), 500
 
 @app.route('/fraud-check', methods=['POST'])
 async def check_fraud():
@@ -441,37 +416,52 @@ if __name__ == '__main__':
     # Set up signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
-    try:
-        # Set up ngrok tunnel if configured
-        ngrok_auth_token = os.environ.get("NGROK_AUTH_TOKEN")
-        ngrok_domain = os.environ.get("NGROK_DOMAIN")
-        
-        if ngrok_auth_token:
-            from pyngrok import ngrok, conf
-            conf.get_default().auth_token = ngrok_auth_token
-            
-            if ngrok_domain:
-                ngrok_tunnel = ngrok.connect(8080, domain=ngrok_domain)
+
+    async def run_server_async():
+        # Create a new event loop for Hypercorn to run in if not already present
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        # Configure Hypercorn
+        hypercorn_config = Config()
+        hypercorn_config.bind = [f"0.0.0.0:{os.environ.get('FLASK_PORT', '8080')}"]
+
+        try:
+            # Set up ngrok tunnel if configured
+            ngrok_auth_token = os.environ.get("NGROK_AUTH_TOKEN")
+            ngrok_domain = os.environ.get("NGROK_DOMAIN")
+
+            if ngrok_auth_token:
+                from pyngrok import ngrok, conf
+                conf.get_default().auth_token = ngrok_auth_token
+
+                if ngrok_domain:
+                    ngrok_tunnel = ngrok.connect(8080, domain=ngrok_domain)
+                else:
+                    ngrok_tunnel = ngrok.connect(8080)
+
+                print(f"Ngrok tunnel established at: {ngrok_tunnel.public_url}")
             else:
-                ngrok_tunnel = ngrok.connect(8080)
-                
-            print(f"Ngrok tunnel established at: {ngrok_tunnel.public_url}")
-        else:
-            print("Warning: NGROK_AUTH_TOKEN not set. Running without ngrok tunnel.")
-        
-        # Start the server
-        serve(app, host='0.0.0.0', port=8080)
-        
-    except Exception as e:
-        print(f"Error starting server: {str(e)}")
-        cleanup_ngrok()
-        sys.exit(1)
-    finally:
-        # Clean up databases on exit
-        print("Checking for databases to delete on exit...")
-        cleanup_dbs_on_exit()
-        print("Database cleanup complete.")
-        # Clean up ngrok
-        print("Disconnecting ngrok...")
-        cleanup_ngrok() 
+                print("Warning: NGROK_AUTH_TOKEN not set. Running without ngrok tunnel.")
+
+            # Start the server using Hypercorn
+            await hypercorn_serve(asgi_app, hypercorn_config)
+
+        except Exception as e:
+            print(f"Error starting server: {str(e)}")
+            cleanup_ngrok()
+            sys.exit(1)
+        finally:
+            # Clean up databases on exit
+            print("Checking for databases to delete on exit...")
+            cleanup_dbs_on_exit()
+            print("Database cleanup complete.")
+            # Clean up ngrok
+            print("Disconnecting ngrok...")
+            cleanup_ngrok()
+
+    # Run the async server function
+    asyncio.run(run_server_async()) 
